@@ -104,9 +104,11 @@ export async function parseGenerateImageInput({
   params: originalParams,
   resources: originalResources,
   workflowDefinition,
+  whatIf,
 }: z.infer<typeof generateImageSchema> & {
   user: SessionUser;
   workflowDefinition: WorkflowDefinition;
+  whatIf?: boolean;
 }) {
   // remove data not allowed by workflow features
   sanitizeParamsByWorkflowDefinition(originalParams, workflowDefinition);
@@ -215,15 +217,17 @@ export async function parseGenerateImageInput({
   // #endregion
 
   // handle moderate prompt
-  const moderationResult = await extModeration.moderatePrompt(params.prompt).catch((error) => {
-    logToAxiom({ name: 'external-moderation-error', type: 'error', message: error.message });
-    return { flagged: false, categories: [] as string[] };
-  });
+  if (!whatIf) {
+    const moderationResult = await extModeration.moderatePrompt(params.prompt).catch((error) => {
+      logToAxiom({ name: 'external-moderation-error', type: 'error', message: error.message });
+      return { flagged: false, categories: [] as string[] };
+    });
 
-  if (moderationResult.flagged) {
-    throw throwBadRequestError(
-      `Your prompt was flagged for: ${moderationResult.categories.join(', ')}`
-    );
+    if (moderationResult.flagged) {
+      throw throwBadRequestError(
+        `Your prompt was flagged for: ${moderationResult.categories.join(', ')}`
+      );
+    }
   }
 
   const hasMinorResource = availableResources.some((resource) => resource.model.minor);
@@ -254,24 +258,26 @@ export async function parseGenerateImageInput({
   const positivePrompts = [params.prompt];
   const negativePrompts = [params.negativePrompt];
   const resourcesToInject: typeof resourceData.injectable = [];
-  for (const item of injectable) {
-    const resource = resourceData.injectable.find((x) => x.id === item.id);
-    if (!resource) continue;
-    resourcesToInject.push(resource);
+  if (!whatIf) {
+    for (const item of injectable) {
+      const resource = resourceData.injectable.find((x) => x.id === item.id);
+      if (!resource) continue;
+      resourcesToInject.push(resource);
 
-    const triggerWord = resource.trainedWords?.[0];
-    if (triggerWord) {
-      if (item.triggerType === 'negative') negativePrompts.unshift(triggerWord);
-      if (item.triggerType === 'positive') positivePrompts.unshift(triggerWord);
-    }
+      const triggerWord = resource.trainedWords?.[0];
+      if (triggerWord) {
+        if (item.triggerType === 'negative') negativePrompts.unshift(triggerWord);
+        if (item.triggerType === 'positive') positivePrompts.unshift(triggerWord);
+      }
 
-    if (item.sanitize) {
-      const sanitized = item.sanitize(params);
-      for (const key in sanitized) {
-        // only assign to step metadata if no value has already been assigned
-        Object.assign(params, {
-          [key as keyof TextToImageParams]: sanitized[key as keyof TextToImageParams],
-        });
+      if (item.sanitize) {
+        const sanitized = item.sanitize(params);
+        for (const key in sanitized) {
+          // only assign to step metadata if no value has already been assigned
+          Object.assign(params, {
+            [key as keyof TextToImageParams]: sanitized[key as keyof TextToImageParams],
+          });
+        }
       }
     }
   }
@@ -281,6 +287,7 @@ export async function parseGenerateImageInput({
   if (params.draft) {
     quantity = Math.ceil(params.quantity / 4);
     batchSize = 4;
+    params.sampler = 'LCM';
   }
 
   if (!params.upscaleHeight || !params.upscaleWidth) {
@@ -305,29 +312,41 @@ export async function parseGenerateImageInput({
       upscaleWidth: upscale?.width,
       upscaleHeight: upscale?.height,
     }),
-    priority: getUserPriority(status, user),
+    // priority: getUserPriority(status, user),
   };
 }
 
 function getResources(step: WorkflowStep) {
-  if (step.$type === 'comfy') return (step as GeneratedImageWorkflowStep).metadata?.resources ?? [];
-  else if (step.$type === 'textToImage')
+  if (step.$type === 'textToImage')
     return getTextToImageAirs([(step as TextToImageStep).input]).map((x) => ({
       id: x.version,
       strength: x.networkParams.strength,
     }));
-  else return [];
+  return (step as GeneratedImageWorkflowStep).metadata?.resources ?? [];
+}
+
+function getTextToImageAirs(inputs: TextToImageInput[]) {
+  return Object.entries(
+    inputs.reduce<Record<string, ImageJobNetworkParams>>((acc, input) => {
+      if (input.model) acc[input.model] = {};
+      const additionalNetworks = input.additionalNetworks ?? {};
+      for (const key in additionalNetworks) acc[key] = additionalNetworks[key];
+      return acc;
+    }, {})
+  ).map(([air, networkParams]) => ({ ...parseAIR(air), networkParams }));
 }
 
 function combineResourcesWithInputResource(
   allResources: GenerationResource[],
   resources: { id: number; strength?: number | null }[]
 ) {
-  return allResources.map((resource) => {
-    const original = resources.find((x) => x.id === resource.id);
-    if (original?.strength) resource.strength = original.strength;
-    return resource;
-  });
+  return allResources
+    .map((resource) => {
+      const original = resources.find((x) => x.id === resource.id);
+      if (!original) return null;
+      return { ...resource, strength: original.strength ?? resource.strength };
+    })
+    .filter(isDefined);
 }
 
 export async function formatGenerationResponse(workflows: Workflow[], user?: SessionUser) {
@@ -361,17 +380,17 @@ export async function formatGenerationResponse(workflows: Workflow[], user?: Ses
   });
 }
 
-// TODO - remove this 30 days after launch
-function getTextToImageAirs(inputs: TextToImageInput[]) {
-  return Object.entries(
-    inputs.reduce<Record<string, ImageJobNetworkParams>>((acc, input) => {
-      if (input.model) acc[input.model] = {};
-      const additionalNetworks = input.additionalNetworks ?? {};
-      for (const key in additionalNetworks) acc[key] = additionalNetworks[key];
-      return acc;
-    }, {})
-  ).map(([air, networkParams]) => ({ ...parseAIR(air), networkParams }));
-}
+// // TODO - remove this 30 days after launch
+// function getTextToImageAirs(inputs: TextToImageInput[]) {
+//   return Object.entries(
+//     inputs.reduce<Record<string, ImageJobNetworkParams>>((acc, input) => {
+//       if (input.model) acc[input.model] = {};
+//       const additionalNetworks = input.additionalNetworks ?? {};
+//       for (const key in additionalNetworks) acc[key] = additionalNetworks[key];
+//       return acc;
+//     }, {})
+//   ).map(([air, networkParams]) => ({ ...parseAIR(air), networkParams }));
+// }
 
 export type WorkflowStepFormatted = ReturnType<typeof formatWorkflowStep>;
 function formatWorkflowStep(args: {
@@ -408,6 +427,8 @@ function formatVideoGenStep({ step, workflowId }: { step: WorkflowStep; workflow
       aspectRatio = width && height ? width / height : 16 / 9;
     } else if (params.type === 'txt2vid') {
       switch (params.engine) {
+        case 'lightricks':
+        case 'kling':
         case 'haiper': {
           if (params.aspectRatio) {
             const [rw, rh] = params.aspectRatio.split(':').map(Number);
@@ -415,13 +436,9 @@ function formatVideoGenStep({ step, workflowId }: { step: WorkflowStep; workflow
           }
           break;
         }
-        case 'kling': {
-          if (params.aspectRatio) {
-            const [rw, rh] = params.aspectRatio.split(':').map(Number);
-            aspectRatio = rw / rh;
-          }
+        case 'minimax':
+          aspectRatio = 16 / 9;
           break;
-        }
         case 'mochi':
           width = 848;
           height = 480;
@@ -501,11 +518,9 @@ function formatTextToImageStep({
 }) {
   const { input, output, jobs } = step as TextToImageStep;
   const metadata = (step.metadata ?? {}) as GeneratedImageStepMetadata;
-  const stepResources = getTextToImageAirs([input]);
+  const stepResources = getResources(step);
 
-  const resources = combineResourcesWithInputResource(allResources, getResources(step)).filter(
-    (resource) => stepResources.some((x) => x.version === resource.id)
-  );
+  const resources = combineResourcesWithInputResource(allResources, stepResources);
   const versionIds = resources.map((x) => x.id);
 
   const checkpoint = resources.find((x) => x.model.type === 'Checkpoint');
@@ -520,8 +535,13 @@ function formatTextToImageStep({
     const triggerWord = resource.trainedWords?.[0];
     if (triggerWord) {
       if (item?.triggerType === 'negative')
+        // while (negativePrompt.startsWith(triggerWord)) {
         negativePrompt = negativePrompt.replace(`${triggerWord}, `, '');
-      if (item?.triggerType === 'positive') prompt = prompt.replace(`${triggerWord}, `, '');
+      // }
+      if (item?.triggerType === 'positive')
+        // while (prompt.startsWith(triggerWord)) {
+        prompt = prompt.replace(`${triggerWord}, `, '');
+      // }
     }
   }
 
@@ -694,9 +714,7 @@ export function formatComfyStep({
     images,
     status: step.status,
     metadata: metadata as GeneratedImageStepMetadata,
-    resources: combineResourcesWithInputResource(resources, stepResources).filter((resource) =>
-      stepResources.some((x) => x.id === resource.id)
-    ),
+    resources: combineResourcesWithInputResource(resources, stepResources),
   };
 }
 

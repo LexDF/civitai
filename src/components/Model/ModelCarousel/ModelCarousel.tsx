@@ -178,7 +178,7 @@ function ModelCarouselContent({
                       <ImageGuard2.BlurToggle className="absolute left-2 top-2 z-10" />
                       <Stack spacing="xs" align="flex-end" className="absolute right-2 top-2 z-10">
                         <ImageContextMenu image={image} />
-                        {features.imageGeneration && image.hasMeta && (
+                        {features.imageGeneration && (image.hasPositivePrompt ?? image.hasMeta) && (
                           <HoverActionButton
                             label="Remix"
                             size={30}
@@ -211,7 +211,7 @@ function ModelCarouselContent({
                             image={image}
                             edgeImageProps={{ width: 450 }}
                             aspectRatio={(image.width ?? 1) / (image.height ?? 1)}
-                            radius="md"
+                            // radius="md"
                             style={{ width: '100%' }}
                             nsfw={!safe}
                           />

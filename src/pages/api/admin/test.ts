@@ -10,8 +10,9 @@ import { getSystemPermissions } from '~/server/services/system-cache';
 import { addGenerationEngine } from '~/server/services/generation/engines';
 import { dbWrite, dbRead } from '~/server/db/client';
 import { limitConcurrency, Task } from '~/server/utils/concurrency-helpers';
-import { getGenerationResourceData } from '~/server/services/generation/generation.service';
+import { getResourceData } from '~/server/services/generation/generation.service';
 import { Prisma } from '@prisma/client';
+import { getCommentsThreadDetails2 } from '~/server/services/commentsv2.service';
 
 type Row = {
   userId: number;
@@ -28,11 +29,11 @@ const test = [1183765, 164821];
 export default WebhookEndpoint(async function (req: NextApiRequest, res: NextApiResponse) {
   try {
     const session = await getServerAuthSession({ req, res });
-    const modelVersions = await getGenerationResourceData({
-      ids: [...test, ...covered, ...notCovered],
+    const modelVersions = await getResourceData({
+      ids: [1182093],
       user: session?.user,
     });
-    //   const modelVersions = await dbRead.$queryRaw`
+    // const modelVersions = await dbRead.$queryRaw`
     //   SELECT
     //     mv."id",
     //     mv."name",
@@ -62,8 +63,14 @@ export default WebhookEndpoint(async function (req: NextApiRequest, res: NextApi
     //     ) as model
     //   FROM "ModelVersion" mv
     //   LEFT JOIN "GenerationCoverage" gc ON gc."modelVersionId" = mv.id
-    //   WHERE mv.id IN (${Prisma.join([...test, ...covered, ...notCovered])})
+    //   WHERE mv.id IN (${Prisma.join([1325378])})
     // `;
+
+    // const thread = await getCommentsThreadDetails2({
+    //   entityId: 10936,
+    //   entityType: 'article',
+    // });
+
     res.status(200).send(modelVersions);
   } catch (e) {
     console.log(e);

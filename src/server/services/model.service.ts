@@ -4,7 +4,12 @@ import { ManipulateType } from 'dayjs';
 import { isEmpty, uniq } from 'lodash-es';
 import { SessionUser } from 'next-auth';
 import { env } from '~/env/server';
-import { BaseModel, BaseModelType, CacheTTL } from '~/server/common/constants';
+import {
+  BaseModel,
+  BaseModelType,
+  CacheTTL,
+  FEATURED_MODEL_COLLECTION_ID,
+} from '~/server/common/constants';
 import { ModelSort, SearchIndexUpdateQueueAction } from '~/server/common/enums';
 import { Context } from '~/server/createContext';
 import { dbRead, dbWrite } from '~/server/db/client';
@@ -13,7 +18,7 @@ import { requestScannerTasks } from '~/server/jobs/scan-files';
 import { logToAxiom } from '~/server/logging/client';
 import { modelMetrics } from '~/server/metrics';
 import { dataForModelsCache, userContentOverviewCache } from '~/server/redis/caches';
-import { redis, REDIS_KEYS } from '~/server/redis/client';
+import { REDIS_KEYS, redis } from '~/server/redis/client';
 import { GetAllSchema, GetByIdInput } from '~/server/schema/base.schema';
 import { ModelVersionMeta } from '~/server/schema/model-version.schema';
 import {
@@ -53,7 +58,6 @@ import {
 } from '~/server/services/collection.service';
 import { getCosmeticsForEntity } from '~/server/services/cosmetic.service';
 import { getUnavailableResources } from '~/server/services/generation/generation.service';
-import { getSystemHomeBlocks } from '~/server/services/home-block.service';
 import {
   getImagesForModelVersion,
   getImagesForModelVersionCache,
@@ -106,6 +110,7 @@ import {
   SetAssociatedResourcesInput,
   SetModelsCategoryInput,
 } from './../schema/model.schema';
+import { bustFetchThroughCache, fetchThroughCache } from '~/server/utils/cache-helpers';
 
 export const getModel = async <TSelect extends Prisma.ModelSelect>({
   id,
@@ -1871,22 +1876,22 @@ export const getRecentlyRecommended = async ({ take, userId }: LimitOnly & { use
   return uniq(data.map((d) => d.resource.modelId));
 };
 
-export const getFeaturedModels = async ({ take }: LimitOnly) => {
-  const homeblocks = await getSystemHomeBlocks({ input: {} });
-  const featuredModelCollection = homeblocks.find(
-    (h) => h.type === HomeBlockType.Collection && h.metadata.link === '/models'
-  );
-  const collectionId = featuredModelCollection?.metadata?.collection?.id ?? 104;
+// export const getFeaturedModels = async ({ take }: LimitOnly) => {
+//   const homeblocks = await getSystemHomeBlocks({ input: {} });
+//   const featuredModelCollection = homeblocks.find(
+//     (h) => h.type === HomeBlockType.Collection && h.metadata.link === '/models'
+//   );
+//   const collectionId = featuredModelCollection?.metadata?.collection?.id ?? 104;
 
-  const featured = await dbRead.collectionItem.findMany({
-    where: { collectionId },
-    select: { modelId: true },
-    orderBy: { createdAt: 'desc' },
-    take,
-  });
+//   const featured = await dbRead.collectionItem.findMany({
+//     where: { collectionId },
+//     select: { modelId: true },
+//     orderBy: { createdAt: 'desc' },
+//     take,
+//   });
 
-  return featured.map(({ modelId }) => modelId).filter(isDefined);
-};
+//   return featured.map(({ modelId }) => modelId).filter(isDefined);
+// };
 
 export const toggleLockModel = async ({ id, locked }: ToggleModelLockInput) => {
   const model = await dbWrite.model.update({ where: { id }, data: { locked } });
@@ -2680,4 +2685,26 @@ export async function ingestModel(data: IngestModelInput) {
 
   if (response.status === 202) return true;
   else return false;
+}
+
+export async function getFeaturedModels() {
+  const featuredModels = await fetchThroughCache(REDIS_KEYS.CACHES.FEATURED_MODELS, async () => {
+    const query = await dbWrite.$queryRaw<{ modelId: number }[]>`
+      SELECT ci."modelId"
+      FROM "CollectionItem" ci
+      WHERE ci."collectionId" = ${FEATURED_MODEL_COLLECTION_ID}
+      AND EXISTS (
+        SELECT 1
+        FROM "GenerationCoverage" gc
+        WHERE gc."modelId" = ci."modelId"
+        AND gc.covered
+      )
+    `;
+    return query.map((row) => row.modelId);
+  });
+
+  return featuredModels;
+}
+export async function bustFeaturedModelsCache() {
+  await bustFetchThroughCache(REDIS_KEYS.CACHES.FEATURED_MODELS);
 }
